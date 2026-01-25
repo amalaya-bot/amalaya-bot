@@ -1,0 +1,12 @@
+{
+  "max_posts_per_run": 10,
+  "sites": [
+    "https://elpilon.com.co/",
+    "https://www.blogvallenato.com/",
+    "https://laguajirahoy.com/",
+    "https://intervallenato.com/inicio/",
+    "https://zuliavallenata.com/",
+    "https://lareinadelvallenato.co/",
+    "https://festivalvallenato.com/"
+  ]
+}
