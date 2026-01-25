@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-import os, re, json, time, base64
+import os, re, json, time
 from urllib.parse import urljoin, urlparse
 import requests
 import feedparser
 from bs4 import BeautifulSoup
 
 # =========================
-# WordPress (Amalaya)
+# WordPress (Amalaya) JWT
 # =========================
 WP_URL = os.environ.get("WP_URL", "https://amalaya.com.co").rstrip("/")
-WP_USER = os.environ.get("WP_USER", "bot-amalaya")
-WP_APP_PASS = os.environ.get("WP_APP_PASS", "")
+WP_USER = os.environ.get("WP_USER", "")
+WP_PASSWORD = os.environ.get("WP_PASSWORD", "")
 WP_POST_STATUS = os.environ.get("WP_POST_STATUS", "draft")  # draft o publish
 
 # =========================
@@ -29,10 +29,9 @@ BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 SOURCES_PATH = os.path.join(BOT_DIR, "sources.json")
 STATE_PATH = os.path.join(BOT_DIR, "state.json")
 
+JWT_TOKEN = None  # cache en runtime
 
-# -------------------------
-# helpers
-# -------------------------
+
 def load_json(path, default):
     if not os.path.exists(path):
         return default
@@ -48,18 +47,40 @@ def clean_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def wp_auth_header():
-    if not WP_APP_PASS:
-        raise RuntimeError("Falta WP_APP_PASS en .env")
-    token = base64.b64encode(f"{WP_USER}:{WP_APP_PASS}".encode("utf-8")).decode("utf-8")
-    return {"Authorization": f"Basic {token}"}
-
 def same_domain(a: str, b: str) -> bool:
     return urlparse(a).netloc == urlparse(b).netloc
 
 
 # -------------------------
-# feed discovery
+# JWT Auth
+# -------------------------
+def get_jwt_token() -> str:
+    global JWT_TOKEN
+    if JWT_TOKEN:
+        return JWT_TOKEN
+
+    if not (WP_USER and WP_PASSWORD):
+        raise RuntimeError("Faltan WP_USER o WP_PASSWORD (Secrets)")
+
+    url = f"{WP_URL}/wp-json/jwt-auth/v1/token"
+    payload = {"username": WP_USER, "password": WP_PASSWORD}
+    r = requests.post(url, json=payload, headers={**HEADERS, "Content-Type": "application/json"}, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"JWT token error {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    token = data.get("token")
+    if not token:
+        raise RuntimeError(f"No token in response: {r.text[:300]}")
+    JWT_TOKEN = token
+    return token
+
+def wp_headers_json() -> dict:
+    token = get_jwt_token()
+    return {**HEADERS, "Authorization": f"Bearer {token}"}
+
+
+# -------------------------
+# Feed discovery
 # -------------------------
 FEED_CANDIDATES = ["feed/", "feed", "rss", "rss/", "rss.xml", "feed.xml", "atom.xml", "?feed=rss2"]
 
@@ -96,7 +117,9 @@ def extract_article_links_from_home(site_url: str, limit: int = 30) -> list[str]
 
         bad_fragments = [
             "#", "/tag/", "/category/", "/categoria/", "/author/", "/wp-content/",
-            "/page/", "/contact", "/privacy", "/terms", "/search", "mailto:", "javascript:"
+            "/page/", "/contact", "/privacy", "/terms", "/search",
+            "mailto:", "javascript:",
+            "politica-de-privacidad", "privacy", "servicios"
         ]
 
         links = []
@@ -105,14 +128,18 @@ def extract_article_links_from_home(site_url: str, limit: int = 30) -> list[str]
             if not href:
                 continue
             full = urljoin(site_url, href)
+
             if not same_domain(full, site_url):
                 continue
+
             low = full.lower()
             if any(x in low for x in bad_fragments):
                 continue
+
             path = urlparse(full).path.strip("/")
             if len(path) < 8:
                 continue
+
             links.append(full)
 
         out, seen = [], set()
@@ -156,7 +183,7 @@ def collect_candidate_urls(sites: list[str], seen: set[str], per_site: int = 25)
 
 
 # -------------------------
-# article parsing
+# Article parsing
 # -------------------------
 def get_article_html(url: str) -> str:
     r = requests.get(url, headers=HEADERS, timeout=25)
@@ -199,7 +226,7 @@ def extract_article_text(html: str, max_chars: int = 12000) -> str:
 
 
 # -------------------------
-# image: og:image -> upload -> Gutenberg image block
+# Image upload
 # -------------------------
 def get_og_image(html: str) -> str | None:
     soup = BeautifulSoup(html, "html.parser")
@@ -232,8 +259,7 @@ def upload_media_to_wp(image_bytes: bytes, ext: str, filename_hint="imagen") -> 
     safe = re.sub(r"[^a-zA-Z0-9_-]+", "-", filename_hint.lower()).strip("-")[:50] or "imagen"
     filename = f"{safe}.{ext}"
     headers = {
-        **HEADERS,
-        **wp_auth_header(),
+        **wp_headers_json(),
         "Content-Disposition": f'attachment; filename="{filename}"'
     }
     r = requests.post(endpoint, headers=headers, data=image_bytes, timeout=30)
@@ -243,7 +269,7 @@ def upload_media_to_wp(image_bytes: bytes, ext: str, filename_hint="imagen") -> 
 
 
 # -------------------------
-# Gutenberg render (EXACT like your example)
+# Gutenberg blocks
 # -------------------------
 def render_p1(text: str) -> str:
     safe = clean_text(text)
@@ -258,20 +284,16 @@ def render_image_block(media_id: int, media_url: str) -> str:
     )
 
 
-# -------------------------
-# WP post create
-# -------------------------
 def create_post_in_wp(title: str, content_html: str) -> dict:
     endpoint = f"{WP_URL}/wp-json/wp/v2/posts"
     payload = {"title": title, "content": content_html, "status": WP_POST_STATUS}
-    headers = {**HEADERS, **wp_auth_header()}
-    r = requests.post(endpoint, headers=headers, json=payload, timeout=35)
+    r = requests.post(endpoint, headers=wp_headers_json(), json=payload, timeout=35)
     r.raise_for_status()
     return r.json()
 
 
 # -------------------------
-# Category & tags (simple + safe)
+# Category & tags
 # -------------------------
 def pick_category(text: str) -> str:
     t = text.lower()
@@ -308,11 +330,11 @@ def tags_from_text(text: str) -> list[str]:
 
 
 # -------------------------
-# OpenAI generation (minimum paragraphs, no fixed length)
+# OpenAI generation
 # -------------------------
 def openai_generate(article_text: str, source_url: str, title_hint: str, snippet_hint: str) -> dict:
     if not OPENAI_API_KEY:
-        raise RuntimeError("Falta OPENAI_API_KEY en .env")
+        raise RuntimeError("Falta OPENAI_API_KEY")
 
     system = (
         "Eres editor de un medio vallenato llamado Amalaya. "
@@ -337,7 +359,6 @@ Tarea:
 - Estilo: neutral, claro, sin emojis.
 - En el último párrafo incluye atribución: "Información basada en la fuente consultada."
 Devuelve SOLO JSON válido:
-
 {{
   "title": "...",
   "seo": "...",
@@ -376,7 +397,7 @@ Devuelve SOLO JSON válido:
     except Exception:
         m = re.search(r"\{.*\}", out_text, flags=re.DOTALL)
         if not m:
-            raise RuntimeError("No pude parsear JSON de la IA. Salida: " + out_text[:400])
+            raise RuntimeError("No pude parsear JSON IA: " + out_text[:300])
         obj = json.loads(m.group(0))
 
     title = clean_text(obj.get("title", ""))[:140] or (clean_text(title_hint)[:140] or "Noticia vallenata")
@@ -422,14 +443,18 @@ def main():
                 category = "artistas"
             tags = tags_from_text(full_text)
 
+            # imagen opcional
             media_block = ""
             og_img = get_og_image(html)
             if og_img:
-                dl = download_image(og_img)
-                if dl:
-                    img_bytes, ext = dl
-                    media = upload_media_to_wp(img_bytes, ext, filename_hint=title)
-                    media_block = render_image_block(media["id"], media["source_url"])
+                try:
+                    dl = download_image(og_img)
+                    if dl:
+                        img_bytes, ext = dl
+                        media = upload_media_to_wp(img_bytes, ext, filename_hint=title)
+                        media_block = render_image_block(media["id"], media["source_url"])
+                except Exception:
+                    media_block = ""
 
             parts = []
             parts.append(render_p1(title))
@@ -440,7 +465,6 @@ def main():
             for p in paragraphs[1:]:
                 parts.append(render_p1(p))
 
-            # últimas 3 líneas (como tu plugin exige)
             parts.append(render_p1(category))
             parts.append(render_p1(", ".join(tags)))
             parts.append(render_p1("#autopublicar"))
