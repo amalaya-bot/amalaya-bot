@@ -23,13 +23,13 @@ jobs:
 
       - name: Run bot
         env:
-  WP_URL: ${{ secrets.WP_URL }}
-  WP_USER: ${{ secrets.WP_USER }}
-  WP_PASSWORD: ${{ secrets.WP_PASSWORD }}
-  WP_POST_STATUS: ${{ secrets.WP_POST_STATUS }}
-  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-  OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-  POSTS_PER_RUN: ${{ secrets.POSTS_PER_RUN }}
-  MIN_PARAGRAPHS: ${{ secrets.MIN_PARAGRAPHS }}
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_PASSWORD: ${{ secrets.WP_PASSWORD }}
+          WP_POST_STATUS: ${{ secrets.WP_POST_STATUS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          POSTS_PER_RUN: ${{ secrets.POSTS_PER_RUN }}
+          MIN_PARAGRAPHS: ${{ secrets.MIN_PARAGRAPHS }}
         run: |
           python bot.py
