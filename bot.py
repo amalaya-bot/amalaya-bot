@@ -17,8 +17,8 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 POSTS_PER_RUN = 10
-HOURS_LIMIT = 72
-HEADERS = {"User-Agent": "AmalayaBot/1.7"}
+HOURS_LIMIT = 24
+HEADERS = {"User-Agent": "AmalayaBot/1.8"}
 
 ALLOWED_CATS = ["historia", "lanzamientos", "videos", "artistas", "festivales", "podcasts", "cronicas"]
 ALLOWED_CATS_STR = ", ".join(ALLOWED_CATS)
@@ -41,11 +41,51 @@ def get_jwt_token():
 def wp_headers():
     return {"Authorization": f"Bearer {get_jwt_token()}", "Content-Type": "application/json"}
 
+def find_image_url(soup, entry):
+    """
+    Intenta obtener una URL de imagen válida con múltiples estrategias:
+    1. og:image del artículo
+    2. Primera imagen <img> con src que termine en extensión de imagen
+    3. Enclosure del feed entry
+    Retorna la URL si la encuentra, None si no hay imagen.
+    """
+    # Estrategia 1: og:image
+    og = soup.find("meta", property="og:image")
+    if og and og.get("content", "").strip():
+        url = og["content"].strip()
+        if any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+            return url
+        # Aunque no tenga extensión clara, si tiene og:image la intentamos
+        return url
+
+    # Estrategia 2: primera <img> grande en el cuerpo
+    for img in soup.find_all("img"):
+        src = img.get("src", "") or img.get("data-src", "") or img.get("data-lazy-src", "")
+        if not src:
+            continue
+        if any(src.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+            # Ignorar iconos o imágenes pequeñas por nombre
+            if any(skip in src.lower() for skip in ["logo", "icon", "avatar", "pixel", "spacer"]):
+                continue
+            return src
+
+    # Estrategia 3: enclosure del feed
+    if hasattr(entry, "enclosures") and entry.enclosures:
+        for enc in entry.enclosures:
+            if enc.get("type", "").startswith("image/"):
+                return enc.get("href") or enc.get("url")
+
+    return None
+
 def upload_media(img_url, title):
     """Sube imagen a WP y retorna el objeto media completo (con id y source_url)."""
     try:
         r = requests.get(img_url, headers=HEADERS, timeout=25)
+        if r.status_code != 200:
+            return None
         ctype = r.headers.get("Content-Type", "").lower()
+        if not ctype.startswith("image/"):
+            return None
         filename = f"amalaya-{int(time.time())}.jpg"
         h = {
             "Authorization": f"Bearer {get_jwt_token()}",
@@ -95,10 +135,9 @@ def img_block(media_id, media_url, alt=""):
 def build_content(data, media, portada_tag):
     """
     Construye el content en formato Gutenberg blocks exacto que espera el plugin.
-    Estructura de posición que el plugin lee:
-      - antepenúltima línea/bloque: categoría (solo el valor, sin prefijo)
-      - penúltima línea/bloque: etiquetas separadas por coma (sin prefijo)
-      - último bloque: #autopublicar
+    - antepenúltimo bloque: categoría (solo el valor)
+    - penúltimo bloque: etiquetas separadas por coma (solo los valores)
+    - último bloque: #autopublicar
     """
     title    = data.get("title", "").strip()
     seo      = data.get("seo", "").strip()
@@ -110,39 +149,24 @@ def build_content(data, media, portada_tag):
     category = data.get("category", "artistas").strip()
     tags_list = list(data.get("tags", []))
 
-    # Etiqueta de portada al inicio de la lista
     if portada_tag:
         tags_list = [portada_tag] + [t for t in tags_list if t not in ("principal", "secundarios")]
     tags_str = ", ".join(tags_list)
 
-    blocks = []
-
-    # Titular
-    blocks.append(p_block(title))
-
-    # Resumen SEO
-    blocks.append(p_block(seo))
-
-    # Primer párrafo (lead)
-    blocks.append(p_block(p1))
-
-    # Imagen destacada (si se subió correctamente)
-    if media and media.get("id") and media.get("source_url"):
-        blocks.append(img_block(media["id"], media["source_url"], alt))
-
-    # Párrafos 2, 3, 4
-    blocks.append(p_block(p2))
-    blocks.append(p_block(p3))
+    blocks = [
+        p_block(title),
+        p_block(seo),
+        p_block(p1),
+        img_block(media["id"], media["source_url"], alt),
+        p_block(p2),
+        p_block(p3),
+    ]
     if p4:
         blocks.append(p_block(p4))
 
-    # Antepenúltimo: categoría (solo el valor)
+    # Posición fija que lee el plugin
     blocks.append(p_block(category))
-
-    # Penúltimo: etiquetas (solo los valores, separados por coma)
     blocks.append(p_block(tags_str))
-
-    # Último: #autopublicar
     blocks.append(p_block("#autopublicar"))
 
     return "\n\n".join(blocks)
@@ -162,7 +186,7 @@ def main():
             state = json.load(f)
     seen = set(state["seen_urls"])
 
-    # ── FASE 1: recolectar candidatos ─────────────────────────────────────────
+    # ── FASE 1: recolectar candidatos con imagen ───────────────────────────────
     candidates = []
 
     for site in sources.get("sites", []):
@@ -186,8 +210,15 @@ def main():
                 r = requests.get(entry.link, headers=HEADERS, timeout=20)
                 soup = BeautifulSoup(r.text, "html.parser")
                 text = " ".join([p.get_text() for p in soup.find_all("p")])
-                og = soup.find("meta", property="og:image")
-                img_url = og.get("content") if og else None
+
+                # Buscar imagen con múltiples estrategias
+                img_url = find_image_url(soup, entry)
+
+                # Descartar si no hay imagen
+                if not img_url:
+                    print(f"[SKIP sin imagen] {entry.link}")
+                    seen.add(entry.link)  # marcar para no revisitar
+                    continue
 
                 candidates.append({
                     "url": entry.link,
@@ -199,17 +230,22 @@ def main():
 
     if not candidates:
         print("[INFO] No hay candidatos nuevos para este run.")
+        state["seen_urls"] = list(seen)[-1000:]
+        with open(STATE_PATH, "w") as f:
+            json.dump(state, f, indent=2)
         return
 
-    # ── FASE 2: ranking por relevancia ────────────────────────────────────────
+    # ── FASE 2: ranking + deduplicación por tema ──────────────────────────────
     ranking_prompt = f"""Eres editor de Amalaya.com.co, sitio de cultura vallenata colombiana.
-Tienes {len(candidates)} noticias candidatas. Ordénalas de mayor a menor relevancia periodística para la portada.
+Tienes {len(candidates)} noticias candidatas. Tu tarea es:
+1. Identificar noticias que cubran el MISMO tema o hecho (aunque vengan de distintos sitios) y quedarte solo con la mejor de cada grupo.
+2. Ordenar las noticias únicas de mayor a menor relevancia periodística para la portada.
 
 Noticias:
 {json.dumps([{"index": i, "texto": c["text"][:400]} for i, c in enumerate(candidates)], ensure_ascii=False)}
 
 Devuelve SOLO un JSON con:
-- "ranking": lista de índices ordenados de mayor a menor relevancia (ej: [3, 0, 5, 1, 2])"""
+- "ranking": lista de índices únicos ordenados de mayor a menor relevancia. Si dos noticias son del mismo tema, incluye solo el índice de la mejor y omite el otro."""
 
     ranking_data = call_openai(ranking_prompt)
     if ranking_data and "ranking" in ranking_data:
@@ -217,11 +253,8 @@ Devuelve SOLO un JSON con:
     else:
         ordered_indices = list(range(len(candidates)))
 
-    # Asegurar que no falte ningún índice
-    present = set(ordered_indices)
-    for i in range(len(candidates)):
-        if i not in present:
-            ordered_indices.append(i)
+    # Asegurar que no haya índices fuera de rango
+    ordered_indices = [i for i in ordered_indices if 0 <= i < len(candidates)]
 
     # ── FASE 3: redactar y publicar ───────────────────────────────────────────
     count = 0
@@ -259,11 +292,17 @@ Devuelve SOLO un JSON con estos campos exactos (sin campos extra):
 
         data = call_openai(article_prompt)
         if not data:
+            portada_rank -= 1  # no consumir posición de portada si falló la IA
             continue
 
         try:
-            # Subir imagen
-            media = upload_media(c["img_url"], data.get("title", "")) if c.get("img_url") else None
+            # Subir imagen — descartar si falla
+            media = upload_media(c["img_url"], data.get("title", ""))
+            if not media or not media.get("id") or not media.get("source_url"):
+                print(f"[SKIP imagen no subió] {c['url']}")
+                seen.add(c["url"])
+                portada_rank -= 1  # no consumir posición de portada
+                continue
 
             # Construir content en formato Gutenberg exacto del plugin
             content = build_content(data, media, portada_tag)
@@ -273,9 +312,8 @@ Devuelve SOLO un JSON con estos campos exactos (sin campos extra):
                 "title": data.get("title", "Sin título"),
                 "content": content,
                 "status": "draft",
+                "featured_media": media["id"],
             }
-            if media and media.get("id"):
-                post_payload["featured_media"] = media["id"]
 
             res_wp = requests.post(
                 f"{WP_URL}/wp-json/wp/v2/posts",
@@ -291,9 +329,11 @@ Devuelve SOLO un JSON con estos campos exactos (sin campos extra):
                 count += 1
             else:
                 print(f"[ERROR WP] {res_wp.status_code} - {res_wp.text[:200]}")
+                portada_rank -= 1
 
         except Exception as e:
             print(f"[ERROR] {e}")
+            portada_rank -= 1
             continue
 
     # ── Guardar estado ─────────────────────────────────────────────────────────
