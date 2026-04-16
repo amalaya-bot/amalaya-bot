@@ -18,9 +18,8 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 POSTS_PER_RUN = 10
 HOURS_LIMIT = 24
-HEADERS = {"User-Agent": "AmalayaBot/1.5"}
+HEADERS = {"User-Agent": "AmalayaBot/1.7"}
 
-# Categorías disponibles en el sitio (slugs exactos de WordPress)
 ALLOWED_CATS = ["historia", "lanzamientos", "videos", "artistas", "festivales", "podcasts", "cronicas"]
 ALLOWED_CATS_STR = ", ".join(ALLOWED_CATS)
 
@@ -42,94 +41,8 @@ def get_jwt_token():
 def wp_headers():
     return {"Authorization": f"Bearer {get_jwt_token()}", "Content-Type": "application/json"}
 
-def get_cat_id(slug):
-    """Busca el ID de una categoría por su slug en WordPress."""
-    try:
-        r = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/categories",
-            params={"slug": slug},
-            headers=wp_headers(),
-            timeout=15
-        )
-        results = r.json()
-        if results:
-            return results[0]["id"]
-    except:
-        pass
-    # Fallback: buscar "artistas"
-    try:
-        r = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/categories",
-            params={"slug": "artistas"},
-            headers=wp_headers(),
-            timeout=15
-        )
-        results = r.json()
-        if results:
-            return results[0]["id"]
-    except:
-        pass
-    return None
-
-def get_valid_cat_slug(suggested_name):
-    """Normaliza el nombre sugerido por la IA al slug más cercano permitido."""
-    name = suggested_name.lower().strip()
-    # Mapa de variantes posibles que la IA podría devolver
-    alias_map = {
-        "crónicas": "cronicas",
-        "crónica": "cronicas",
-        "cronica": "cronicas",
-        "podcast": "podcasts",
-        "video": "videos",
-        "festival": "festivales",
-        "artista": "artistas",
-        "lanzamiento": "lanzamientos",
-    }
-    name = alias_map.get(name, name)
-    return name if name in ALLOWED_CATS else "artistas"
-
-def get_or_create_tag(tag_name):
-    """Retorna el ID de un tag en WordPress, creándolo si no existe."""
-    headers = wp_headers()
-    name = tag_name.lower().strip()
-    try:
-        r = requests.get(
-            f"{WP_URL}/wp-json/wp/v2/tags",
-            params={"search": name},
-            headers=headers,
-            timeout=15
-        )
-        results = r.json()
-        if results:
-            # Buscar coincidencia exacta primero
-            for t in results:
-                if t["name"].lower() == name:
-                    return t["id"]
-            # Si no hay exacta, usar la primera
-            return results[0]["id"]
-        # Crear el tag
-        r2 = requests.post(
-            f"{WP_URL}/wp-json/wp/v2/tags",
-            headers=headers,
-            json={"name": name},
-            timeout=15
-        )
-        if r2.status_code in [200, 201]:
-            return r2.json()["id"]
-    except:
-        pass
-    return None
-
-def resolve_tag_ids(tag_names):
-    """Convierte lista de nombres de tags a lista de IDs de WordPress."""
-    ids = []
-    for name in tag_names:
-        tid = get_or_create_tag(name)
-        if tid:
-            ids.append(tid)
-    return ids
-
 def upload_media(img_url, title):
+    """Sube imagen a WP y retorna el objeto media completo (con id y source_url)."""
     try:
         r = requests.get(img_url, headers=HEADERS, timeout=25)
         ctype = r.headers.get("Content-Type", "").lower()
@@ -161,6 +74,79 @@ def call_openai(prompt):
     except:
         return None
 
+def p_block(text):
+    """Genera un bloque Gutenberg de párrafo con clase p1."""
+    return (
+        '<!-- wp:paragraph {"className":"p1"} -->\n'
+        f'<p class="p1">{text}</p>\n'
+        '<!-- /wp:paragraph -->'
+    )
+
+def img_block(media_id, media_url, alt=""):
+    """Genera un bloque Gutenberg de imagen."""
+    return (
+        f'<!-- wp:image {{"id":{media_id},"sizeSlug":"large"}} -->\n'
+        f'<figure class="wp-block-image size-large">'
+        f'<img src="{media_url}" alt="{alt}" class="wp-image-{media_id}"/>'
+        f'</figure>\n'
+        '<!-- /wp:image -->'
+    )
+
+def build_content(data, media, portada_tag):
+    """
+    Construye el content en formato Gutenberg blocks exacto que espera el plugin.
+    Estructura de posición que el plugin lee:
+      - antepenúltima línea/bloque: categoría (solo el valor, sin prefijo)
+      - penúltima línea/bloque: etiquetas separadas por coma (sin prefijo)
+      - último bloque: #autopublicar
+    """
+    title    = data.get("title", "").strip()
+    seo      = data.get("seo", "").strip()
+    p1       = data.get("p1", "").strip()
+    p2       = data.get("p2", "").strip()
+    p3       = data.get("p3", "").strip()
+    p4       = data.get("p4", "").strip()
+    alt      = data.get("img_alt", "").strip()
+    category = data.get("category", "artistas").strip()
+    tags_list = list(data.get("tags", []))
+
+    # Etiqueta de portada al inicio de la lista
+    if portada_tag:
+        tags_list = [portada_tag] + [t for t in tags_list if t not in ("principal", "secundarios")]
+    tags_str = ", ".join(tags_list)
+
+    blocks = []
+
+    # Titular
+    blocks.append(p_block(title))
+
+    # Resumen SEO
+    blocks.append(p_block(seo))
+
+    # Primer párrafo (lead)
+    blocks.append(p_block(p1))
+
+    # Imagen destacada (si se subió correctamente)
+    if media and media.get("id") and media.get("source_url"):
+        blocks.append(img_block(media["id"], media["source_url"], alt))
+
+    # Párrafos 2, 3, 4
+    blocks.append(p_block(p2))
+    blocks.append(p_block(p3))
+    if p4:
+        blocks.append(p_block(p4))
+
+    # Antepenúltimo: categoría (solo el valor)
+    blocks.append(p_block(category))
+
+    # Penúltimo: etiquetas (solo los valores, separados por coma)
+    blocks.append(p_block(tags_str))
+
+    # Último: #autopublicar
+    blocks.append(p_block("#autopublicar"))
+
+    return "\n\n".join(blocks)
+
 # =========================
 # PROCESO PRINCIPAL
 # =========================
@@ -176,7 +162,7 @@ def main():
             state = json.load(f)
     seen = set(state["seen_urls"])
 
-    # ── FASE 1: recolectar candidatos ──────────────────────────────────────────
+    # ── FASE 1: recolectar candidatos ─────────────────────────────────────────
     candidates = []
 
     for site in sources.get("sites", []):
@@ -207,7 +193,6 @@ def main():
                     "url": entry.link,
                     "text": text[:6000],
                     "img_url": img_url,
-                    "pub_date": pub_date.isoformat()
                 })
             except:
                 continue
@@ -216,33 +201,31 @@ def main():
         print("[INFO] No hay candidatos nuevos para este run.")
         return
 
-    # ── FASE 2: pedir a la IA que ordene por relevancia ───────────────────────
+    # ── FASE 2: ranking por relevancia ────────────────────────────────────────
     ranking_prompt = f"""Eres editor de Amalaya.com.co, sitio de cultura vallenata colombiana.
-A continuación tienes {len(candidates)} noticias candidatas numeradas del 0 al {len(candidates)-1}.
-Ordénalas de mayor a menor relevancia periodística para la portada del sitio.
+Tienes {len(candidates)} noticias candidatas. Ordénalas de mayor a menor relevancia periodística para la portada.
 
 Noticias:
-{json.dumps([{"index": i, "texto": c["text"][:500]} for i, c in enumerate(candidates)], ensure_ascii=False)}
+{json.dumps([{"index": i, "texto": c["text"][:400]} for i, c in enumerate(candidates)], ensure_ascii=False)}
 
-Devuelve SOLO un JSON con este campo:
+Devuelve SOLO un JSON con:
 - "ranking": lista de índices ordenados de mayor a menor relevancia (ej: [3, 0, 5, 1, 2])"""
 
     ranking_data = call_openai(ranking_prompt)
     if ranking_data and "ranking" in ranking_data:
         ordered_indices = ranking_data["ranking"]
     else:
-        # Si la IA falla el ranking, usar orden original
         ordered_indices = list(range(len(candidates)))
 
-    # Asegurarse de que todos los índices estén presentes (por si la IA omite alguno)
+    # Asegurar que no falte ningún índice
     present = set(ordered_indices)
     for i in range(len(candidates)):
         if i not in present:
             ordered_indices.append(i)
 
-    # ── FASE 3: procesar y publicar en orden de relevancia ────────────────────
+    # ── FASE 3: redactar y publicar ───────────────────────────────────────────
     count = 0
-    portada_rank = 0  # 0 = principal, 1 y 2 = secundarios, resto = sin etiqueta de portada
+    portada_rank = 0
 
     for idx in ordered_indices:
         if count >= POSTS_PER_RUN:
@@ -250,7 +233,6 @@ Devuelve SOLO un JSON con este campo:
 
         c = candidates[idx]
 
-        # Etiqueta de portada según posición
         if portada_rank == 0:
             portada_tag = "principal"
         elif portada_rank in [1, 2]:
@@ -259,20 +241,21 @@ Devuelve SOLO un JSON con este campo:
             portada_tag = None
         portada_rank += 1
 
-        # Prompt de redacción
         article_prompt = f"""Eres redactor de Amalaya.com.co, sitio de cultura vallenata colombiana.
-Escribe una noticia original basada en el siguiente texto fuente:
+Escribe una noticia original basada en este texto fuente:
 
 {c['text']}
 
-Devuelve SOLO un JSON con estos campos:
-- "title": título atractivo y periodístico en español
-- "seo": descripción SEO de máximo 155 caracteres
-- "paragraphs": lista de exactamente 4 párrafos bien redactados
-- "category": UNA de estas opciones exactas (elige la más apropiada): {ALLOWED_CATS_STR}
-- "tags": lista de 5 a 8 etiquetas relevantes en español, en minúsculas, sin tildes obligatorias
-
-No uses ninguna categoría fuera de la lista. No agregues campos extra."""
+Devuelve SOLO un JSON con estos campos exactos (sin campos extra):
+- "title": titular periodístico atractivo en español
+- "seo": frase resumen SEO de 120-160 caracteres, sin emojis, con nombre del artista o tema
+- "p1": primer párrafo — lead informativo (qué pasó, quién, cuándo, dónde)
+- "p2": segundo párrafo — contexto, antecedentes, cifras o fechas relevantes
+- "p3": tercer párrafo — reacciones, citas o detalles del anuncio
+- "p4": cuarto párrafo — qué sigue: fechas, ticketing, lanzamiento, próximos shows
+- "img_alt": texto alternativo corto y descriptivo para la imagen destacada
+- "category": UNA de estas opciones exactas: {ALLOWED_CATS_STR}
+- "tags": lista de 5 a 8 etiquetas en español, minúsculas"""
 
         data = call_openai(article_prompt)
         if not data:
@@ -280,32 +263,19 @@ No uses ninguna categoría fuera de la lista. No agregues campos extra."""
 
         try:
             # Subir imagen
-            media = upload_media(c["img_url"], data["title"]) if c.get("img_url") else None
+            media = upload_media(c["img_url"], data.get("title", "")) if c.get("img_url") else None
 
-            # Resolver categoría
-            cat_slug = get_valid_cat_slug(data.get("category", "artistas"))
-            cat_id = get_cat_id(cat_slug)
-
-            # Resolver etiquetas: temáticas + portada
-            tag_names = [t.lower().strip() for t in data.get("tags", [])]
-            if portada_tag:
-                tag_names = [portada_tag] + tag_names
-            tag_ids = resolve_tag_ids(tag_names)
-
-            # Contenido: solo los párrafos (el plugin maneja el resto)
-            content = "\n\n".join(data["paragraphs"]) + "\n#autopublicar"
+            # Construir content en formato Gutenberg exacto del plugin
+            content = build_content(data, media, portada_tag)
 
             # Publicar como draft
             post_payload = {
-                "title": data["title"],
+                "title": data.get("title", "Sin título"),
                 "content": content,
-                "excerpt": data.get("seo", ""),
                 "status": "draft",
-                "featured_media": media["id"] if media else None,
-                "tags": tag_ids
             }
-            if cat_id:
-                post_payload["categories"] = [cat_id]
+            if media and media.get("id"):
+                post_payload["featured_media"] = media["id"]
 
             res_wp = requests.post(
                 f"{WP_URL}/wp-json/wp/v2/posts",
@@ -316,7 +286,7 @@ No uses ninguna categoría fuera de la lista. No agregues campos extra."""
 
             if res_wp.status_code in [200, 201]:
                 label = f"[{portada_tag.upper()}]" if portada_tag else "[noticia]"
-                print(f"{label} {data['title']} → {cat_slug} | tags: {tag_names}")
+                print(f"{label} {data.get('title')} → {data.get('category')} | tags: {data.get('tags')}")
                 seen.add(c["url"])
                 count += 1
             else:
