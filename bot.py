@@ -17,7 +17,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 POSTS_PER_RUN = 10
-HOURS_LIMIT = 24
+HOURS_LIMIT = 72
 HEADERS = {"User-Agent": "AmalayaBot/1.7"}
 
 ALLOWED_CATS = ["historia", "lanzamientos", "videos", "artistas", "festivales", "podcasts", "cronicas"]
