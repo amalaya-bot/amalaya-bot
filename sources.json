@@ -1,6 +1,7 @@
 {
-  "max_posts_per_run": 2,
+  "max_posts_per_run": 5,
   "sites": [
-    "https://www.eltiempo.com/cultura/musica/"
+    "https://www.semana.com/cultura/",
+    "https://www.elespectador.com/entretenimiento/musica/"
   ]
 }
