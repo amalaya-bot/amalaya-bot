@@ -5,9 +5,13 @@ on:
     - cron: "0 12 * * *"  # 7:00 AM Colombia (UTC-5) = 12:00 UTC
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,10 +30,15 @@ jobs:
           WP_URL: ${{ secrets.WP_URL }}
           WP_USER: ${{ secrets.WP_USER }}
           WP_PASSWORD: ${{ secrets.WP_PASSWORD }}
-          WP_POST_STATUS: ${{ secrets.WP_POST_STATUS }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          POSTS_PER_RUN: ${{ secrets.POSTS_PER_RUN }}
-          MIN_PARAGRAPHS: ${{ secrets.MIN_PARAGRAPHS }}
         run: |
           python bot.py
+
+      - name: Keep repo alive
+        run: |
+          git config user.email "bot@amalaya.com.co"
+          git config user.name "AmalayaBot"
+          git add state.json || true
+          git diff --cached --quiet || git commit -m "chore: state update [skip ci]"
+          git push || true
