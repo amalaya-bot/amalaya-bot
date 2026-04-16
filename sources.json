@@ -1,7 +1,12 @@
 {
-  "max_posts_per_run": 5,
+  "max_posts_per_run": 6,
   "sites": [
-    "https://www.semana.com/cultura/",
-    "https://www.elespectador.com/entretenimiento/musica/"
+    "https://elpilon.com.co/vallenato/",
+    "https://www.eluniversal.com.co/tags/vallenato/",
+    "https://www.elheraldo.co/tags/vallenato/",
+    "https://intervallenato.com/inicio/",
+    "https://zuliavallenata.com/",
+    "https://lareinadelvallenato.co/",
+    "https://festivalvallenato.com/salon-de-prensa/"
   ]
 }
