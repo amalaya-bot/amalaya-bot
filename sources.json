@@ -1,5 +1,5 @@
 {
-  "max_posts_per_run": 12,
+  "max_posts_per_run": 15,
   "sites": [
     "https://elpilon.com.co/vallenato/",
     "https://www.eluniversal.com.co/tags/vallenato/",
@@ -7,6 +7,12 @@
     "https://intervallenato.com/inicio/",
     "https://zuliavallenata.com/",
     "https://lareinadelvallenato.co/",
-    "https://festivalvallenato.com/salon-de-prensa/"
+    "https://festivalvallenato.com/salon-de-prensa/",
+    "https://www.blogvallenato.com/",
+    "https://www.sentirvallenato.com/blog",
+    "https://olimpicastereo.com.co/tags/vallenato",
+    "https://www.pulzo.com/noticias/vallenato",
+    "https://www.noticiascaracol.com/noticias/vallenato-colombia",
+    "https://vanguardia.com/entretenimiento/musica/vallenato/"
   ]
 }
