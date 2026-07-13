@@ -16,9 +16,10 @@ WP_PASSWORD = os.environ.get("WP_PASSWORD", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
-POSTS_PER_RUN = 10
-HOURS_LIMIT = 24
-HEADERS = {"User-Agent": "AmalayaBot/1.8"}
+POSTS_PER_RUN = 15       # subido de 10 a 15
+HOURS_LIMIT = 36         # subido de 24 a 36 para tener más candidatos
+CANDIDATE_BUFFER = 35    # candidatos a recolectar antes de filtrar
+HEADERS = {"User-Agent": "AmalayaBot/1.9"}
 
 ALLOWED_CATS = ["historia", "lanzamientos", "videos", "artistas", "festivales", "podcasts", "cronicas"]
 ALLOWED_CATS_STR = ", ".join(ALLOWED_CATS)
@@ -42,29 +43,20 @@ def wp_headers():
     return {"Authorization": f"Bearer {get_jwt_token()}", "Content-Type": "application/json"}
 
 def find_image_url(soup, entry):
-    """
-    Intenta obtener una URL de imagen válida con múltiples estrategias:
-    1. og:image del artículo
-    2. Primera imagen <img> con src que termine en extensión de imagen
-    3. Enclosure del feed entry
-    Retorna la URL si la encuentra, None si no hay imagen.
-    """
     # Estrategia 1: og:image
     og = soup.find("meta", property="og:image")
     if og and og.get("content", "").strip():
         url = og["content"].strip()
         if any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]):
             return url
-        # Aunque no tenga extensión clara, si tiene og:image la intentamos
         return url
 
-    # Estrategia 2: primera <img> grande en el cuerpo
+    # Estrategia 2: primera <img> válida en el cuerpo
     for img in soup.find_all("img"):
         src = img.get("src", "") or img.get("data-src", "") or img.get("data-lazy-src", "")
         if not src:
             continue
         if any(src.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]):
-            # Ignorar iconos o imágenes pequeñas por nombre
             if any(skip in src.lower() for skip in ["logo", "icon", "avatar", "pixel", "spacer"]):
                 continue
             return src
@@ -78,7 +70,6 @@ def find_image_url(soup, entry):
     return None
 
 def upload_media(img_url, title):
-    """Sube imagen a WP y retorna el objeto media completo (con id y source_url)."""
     try:
         r = requests.get(img_url, headers=HEADERS, timeout=25)
         if r.status_code != 200:
@@ -98,7 +89,6 @@ def upload_media(img_url, title):
         return None
 
 def call_openai(prompt):
-    """Llama a OpenAI y retorna el JSON parseado, o None si falla."""
     try:
         res = requests.post(
             "https://api.openai.com/v1/chat/completions",
@@ -115,7 +105,6 @@ def call_openai(prompt):
         return None
 
 def p_block(text):
-    """Genera un bloque Gutenberg de párrafo con clase p1."""
     return (
         '<!-- wp:paragraph {"className":"p1"} -->\n'
         f'<p class="p1">{text}</p>\n'
@@ -123,7 +112,6 @@ def p_block(text):
     )
 
 def img_block(media_id, media_url, alt=""):
-    """Genera un bloque Gutenberg de imagen."""
     return (
         f'<!-- wp:image {{"id":{media_id},"sizeSlug":"large"}} -->\n'
         f'<figure class="wp-block-image size-large">'
@@ -133,12 +121,6 @@ def img_block(media_id, media_url, alt=""):
     )
 
 def build_content(data, media, portada_tag):
-    """
-    Construye el content en formato Gutenberg blocks exacto que espera el plugin.
-    - antepenúltimo bloque: categoría (solo el valor)
-    - penúltimo bloque: etiquetas separadas por coma (solo los valores)
-    - último bloque: #autopublicar
-    """
     title    = data.get("title", "").strip()
     seo      = data.get("seo", "").strip()
     p1       = data.get("p1", "").strip()
@@ -164,7 +146,6 @@ def build_content(data, media, portada_tag):
     if p4:
         blocks.append(p_block(p4))
 
-    # Posición fija que lee el plugin
     blocks.append(p_block(category))
     blocks.append(p_block(tags_str))
     blocks.append(p_block("#autopublicar"))
@@ -186,16 +167,16 @@ def main():
             state = json.load(f)
     seen = set(state["seen_urls"])
 
-    # ── FASE 1: recolectar candidatos con imagen ───────────────────────────────
+    # ── FASE 1: recolectar candidatos ─────────────────────────────────────────
     candidates = []
 
     for site in sources.get("sites", []):
-        if len(candidates) >= POSTS_PER_RUN * 2:
+        if len(candidates) >= CANDIDATE_BUFFER:
             break
         feed = feedparser.parse(urljoin(site, "feed/"))
 
         for entry in feed.entries:
-            if len(candidates) >= POSTS_PER_RUN * 2:
+            if len(candidates) >= CANDIDATE_BUFFER:
                 break
             if entry.link in seen:
                 continue
@@ -211,13 +192,11 @@ def main():
                 soup = BeautifulSoup(r.text, "html.parser")
                 text = " ".join([p.get_text() for p in soup.find_all("p")])
 
-                # Buscar imagen con múltiples estrategias
                 img_url = find_image_url(soup, entry)
 
-                # Descartar si no hay imagen
                 if not img_url:
                     print(f"[SKIP sin imagen] {entry.link}")
-                    seen.add(entry.link)  # marcar para no revisitar
+                    seen.add(entry.link)
                     continue
 
                 candidates.append({
@@ -235,7 +214,9 @@ def main():
             json.dump(state, f, indent=2)
         return
 
-    # ── FASE 2: ranking + deduplicación por tema ──────────────────────────────
+    print(f"[INFO] {len(candidates)} candidatos encontrados")
+
+    # ── FASE 2: ranking + deduplicación ───────────────────────────────────────
     ranking_prompt = f"""Eres editor de Amalaya.com.co, sitio de cultura vallenata colombiana.
 Tienes {len(candidates)} noticias candidatas. Tu tarea es:
 1. Identificar noticias que cubran el MISMO tema o hecho (aunque vengan de distintos sitios) y quedarte solo con la mejor de cada grupo.
@@ -253,7 +234,6 @@ Devuelve SOLO un JSON con:
     else:
         ordered_indices = list(range(len(candidates)))
 
-    # Asegurar que no haya índices fuera de rango
     ordered_indices = [i for i in ordered_indices if 0 <= i < len(candidates)]
 
     # ── FASE 3: redactar y publicar ───────────────────────────────────────────
@@ -272,7 +252,6 @@ Devuelve SOLO un JSON con:
             portada_tag = "secundarios"
         else:
             portada_tag = None
-        portada_rank += 1
 
         article_prompt = f"""Eres redactor de Amalaya.com.co, sitio de cultura vallenata colombiana.
 Escribe una noticia original basada en este texto fuente:
@@ -292,22 +271,17 @@ Devuelve SOLO un JSON con estos campos exactos (sin campos extra):
 
         data = call_openai(article_prompt)
         if not data:
-            portada_rank -= 1  # no consumir posición de portada si falló la IA
             continue
 
         try:
-            # Subir imagen — descartar si falla
             media = upload_media(c["img_url"], data.get("title", ""))
             if not media or not media.get("id") or not media.get("source_url"):
                 print(f"[SKIP imagen no subió] {c['url']}")
                 seen.add(c["url"])
-                portada_rank -= 1  # no consumir posición de portada
                 continue
 
-            # Construir content en formato Gutenberg exacto del plugin
             content = build_content(data, media, portada_tag)
 
-            # Publicar como draft
             post_payload = {
                 "title": data.get("title", "Sin título"),
                 "content": content,
@@ -323,17 +297,16 @@ Devuelve SOLO un JSON con estos campos exactos (sin campos extra):
             )
 
             if res_wp.status_code in [200, 201]:
+                portada_rank += 1
                 label = f"[{portada_tag.upper()}]" if portada_tag else "[noticia]"
                 print(f"{label} {data.get('title')} → {data.get('category')} | tags: {data.get('tags')}")
                 seen.add(c["url"])
                 count += 1
             else:
                 print(f"[ERROR WP] {res_wp.status_code} - {res_wp.text[:200]}")
-                portada_rank -= 1
 
         except Exception as e:
             print(f"[ERROR] {e}")
-            portada_rank -= 1
             continue
 
     # ── Guardar estado ─────────────────────────────────────────────────────────
